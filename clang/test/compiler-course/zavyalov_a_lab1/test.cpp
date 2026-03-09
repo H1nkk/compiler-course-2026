@@ -16,4 +16,12 @@ void example() {
     for (int i = 0; i < 10; ++i) { 
         // ...
     }
+
+    int t = 5;
+    int &t_ref_nonconst_assgn = t;
+    t_ref_nonconst_assgn = 6;
+
+    int &t_ref_nonconst_compound_add = t;
+    t_ref_nonconst_compound_add += 4;
+    int &t_ref_const = t;
 }
