@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -load %llvmshlibdir/zavyalov_a_lab1_ClangAST%pluginext -plugin zavyalov_a_lab1_plugin -fsyntax-only %s 2>&1
+// RUN: %clang_cc1 -load %llvmshlibdir/zavyalov_a_lab1_ClangAST%pluginext -plugin zavyalov_a_lab1_plugin -fsyntax-only %s 2>&1 | FileCheck %s
 
 class A {
     int field = 0;
@@ -29,16 +29,24 @@ void foo_address(int* x) {
 
 void example() {
     // Pointers that can be made const
-    int* x = new int(10);        // Можно сделать const (не изменяется)
+    
+    // CHECK: changed x type to "const int * const"
+    int* x = new int(10);
 
+    // CHECK-NEXT: changed z type to "const int * const"
     int* z = new int(10);         // Можно сделать const (не изменяется)
 
+    // CHECK-NEXT: changed px type to "const int ** const"
     int ** px = &x; // can be made const
+    // CHECK-NEXT: changed ppx type to "const int *** const"
     int *** ppx = &px;
+    // CHECK-NEXT: changed pppx type to "const int **** const"
     int **** pppx = &ppx;
 
+    // CHECK-NEXT: changed sum type to "const int * const"
     int* sum = new int(*x + *z);  // Можно сделать const (не изменяется)
 
+    // CHECK-NEXT: changed custom_class_test_const type to "const A * const"
     A *custom_class_test_const = new A(); // Можно сделать const (не изменяется)
     custom_class_test_const->constMethod();
     
@@ -93,16 +101,26 @@ void example() {
 
 
     // References that can be made const
+    // CHECK-NEXT: changed t_ref_const_unchanged type to "const int &"
     int &t_ref_const_unchanged = t;
 
+    // CHECK-NEXT: changed t_ref_const_func_argument_ref type to "const int &"
     int &t_ref_const_func_argument_ref = t;
     foo_const_ref(t_ref_const_func_argument_ref);
 
+    // CHECK-NEXT: changed t_ref_const_func_argument_value type to "const int &"
     int &t_ref_const_func_argument_value = t;
     foo_value(t_ref_const_func_argument_value);
 
+    // CHECK-NEXT: changed a_const_ref type to "const A &"
     A &a_const_ref = a;
     a_const_ref.constMethod();
 
     ++t;
+
+
+    // Already const references and pointers
+    const int &t_r = t;
+
+    const int* const ptr_const = new int(5);
 }

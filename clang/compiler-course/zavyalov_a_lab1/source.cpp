@@ -11,10 +11,22 @@
 namespace {
 class ZavyalovVisitor final : public clang::RecursiveASTVisitor<ZavyalovVisitor> {
 public:
-  explicit ZavyalovVisitor(clang::ASTContext *context, clang::Rewriter &rewriter) : m_context(context), m_rewriter(rewriter) {}
+  explicit ZavyalovVisitor(clang::ASTContext *context, clang::Rewriter &rewriter) : m_rewriter(rewriter) {}
 
   bool VisitVarDecl(clang::VarDecl *varDecl) {
+
     clang::QualType varType = varDecl->getType();
+
+    if (varType.isConstQualified()) {
+      return true;
+    }
+
+    if (varType->isReferenceType()) {
+      if (varType.getNonReferenceType().isConstQualified()) {
+        return true;  // пропускаем const ссылку
+      }
+    }
+
     if (varType->isPointerType()) {
       const_ptrs.insert(varDecl);
 
@@ -27,8 +39,6 @@ public:
 
             if (auto* declRef = llvm::dyn_cast<clang::DeclRefExpr>(subExpr)) {
               if (auto* rhs_varDecl = llvm::dyn_cast<clang::VarDecl>(declRef->getDecl())) {
-                llvm::outs() << "ptr is being initialized with address of " << rhs_varDecl->getNameAsString() << "\n";
-
                 aliasGraph[varDecl].push_back(rhs_varDecl);
                 aliasGraph[rhs_varDecl].push_back(varDecl);
               }
@@ -40,8 +50,6 @@ public:
         if (auto* declRef = llvm::dyn_cast<clang::DeclRefExpr>(initExpr->IgnoreParenImpCasts())) {
           if (auto* rhs_varDecl = llvm::dyn_cast<clang::VarDecl>(declRef->getDecl())) {
             if (rhs_varDecl->getType()->isPointerType()) {
-              llvm::outs() << "ptr is being initialized with pointer: " << rhs_varDecl->getNameAsString() << "\n";
-
               aliasGraph[varDecl].push_back(rhs_varDecl);
               aliasGraph[rhs_varDecl].push_back(varDecl);
 
@@ -54,16 +62,14 @@ public:
 
     if (varType->isReferenceType()) {
       const_refs.insert(varDecl);
-      llvm::outs() << "reference found: " << varDecl->getNameAsString() << "\n";
+
+      clang::Expr *initExpr = varDecl->getInit();
 
       // проверка что ссылка инициализируется другой ссылкой
-      clang::Expr *initExpr = varDecl->getInit();
       if (initExpr)
         if (auto* declRef = llvm::dyn_cast<clang::DeclRefExpr>(initExpr)) 
           if (auto* rhs_varDecl = llvm::dyn_cast<clang::VarDecl>(declRef->getDecl())) {
             if (rhs_varDecl->getType()->isReferenceType()) {
-              llvm::outs() << "reference is being initialized with another reference: " << rhs_varDecl->getNameAsString() << "\n";
-
               aliasGraph[rhs_varDecl].push_back(varDecl);
               aliasGraph[varDecl].push_back(rhs_varDecl);
             }
@@ -83,7 +89,6 @@ public:
           clang::Expr *subExpr = unaryOp->getSubExpr()->IgnoreParenCasts(); 
           if (auto* declRef = llvm::dyn_cast<clang::DeclRefExpr>(subExpr)) {
             if (auto* varDecl = llvm::dyn_cast<clang::VarDecl>(declRef->getDecl())) {
-              llvm::outs() << "ptr is being derefernsed and reassigned: " << varDecl->getNameAsString() << "\n";
               if (const_ptrs.find(varDecl) != const_ptrs.end()) {
                 const_ptrs.erase(const_ptrs.find(varDecl));
               }
@@ -97,12 +102,6 @@ public:
 
             // проверка является ли lhs ссылкой
             if (varDecl->getType()->isReferenceType()) {
-              llvm::outs() << "Найден AssignmentOp\n";
-              llvm::outs() << "Слева ссылка: " << varDecl->getNameAsString() << "\n";
-              
-              clang::QualType referencedType = varDecl->getType().getNonReferenceType();
-              llvm::outs() << "Ссылается на: " << referencedType.getAsString() << "\n";
-
               if (const_refs.find(varDecl) != const_refs.end()) {
                 const_refs.erase(const_refs.find(varDecl));
               }
@@ -110,9 +109,6 @@ public:
 
             // проверка является ли lhs указателем
             if (varDecl->getType()->isPointerType()) {
-              llvm::outs() << "Найден AssignmentOp\n";
-              llvm::outs() << "Слева указатель: " << varDecl->getNameAsString() << "\n";
-              
               if (const_ptrs.find(varDecl) != const_ptrs.end()) {
                 const_ptrs.erase(const_ptrs.find(varDecl));
               }
@@ -134,8 +130,6 @@ public:
       
       if (auto *declRef = llvm::dyn_cast<clang::DeclRefExpr>(subExpr)) {
         if (auto *referenceVar = llvm::dyn_cast<clang::VarDecl>(declRef->getDecl())) {
-          llvm::outs() << "increment or decrement found: " << referenceVar->getNameAsString() << "\n";
-            
           if (const_refs.find(referenceVar) != const_refs.end()) {
             const_refs.erase(const_refs.find(referenceVar));
           }
@@ -157,13 +151,13 @@ public:
       clang::Expr *arg = call->getArg(i)->IgnoreParenImpCasts();
 
       clang::ParmVarDecl* paramDecl = decl->getParamDecl(i);
+
+      // проверка что в функцию передается ссылка неконстантно 
       if (paramDecl->getType()->isReferenceType()) {
         bool isConstRef = paramDecl->getType().getNonReferenceType().isConstQualified();
         if (!isConstRef) {
           if (auto *declRef = llvm::dyn_cast<clang::DeclRefExpr>(arg)) {
             if (auto *referenceVar = llvm::dyn_cast<clang::VarDecl>(declRef->getDecl())) {
-              llvm::outs() << "reference as non-const argument found: " << referenceVar->getNameAsString() << "\n";
-              
               if (const_refs.find(referenceVar) != const_refs.end()) {
                 const_refs.erase(const_refs.find(referenceVar));
               }
@@ -172,21 +166,20 @@ public:
         }
       }
 
-      // проверка что в функцию передается адрес
+      // проверка что в неконстантную функцию передается адрес
       if (paramDecl->getType()->isPointerType()) {
         bool isConstRef = paramDecl->getType()->getPointeeType().isConstQualified();
         if (!isConstRef) {
           if (auto *op = llvm::dyn_cast<clang::UnaryOperator>(arg)) {
             if (op->getOpcode() == clang::UO_AddrOf) { // в функцию передаётся адрес взятый через &
               clang::Expr *subExpr = op->getSubExpr()->IgnoreParenImpCasts();
-        
               if (auto *declRef = llvm::dyn_cast<clang::DeclRefExpr>(subExpr)) {
                 if (auto *referenceVar = llvm::dyn_cast<clang::VarDecl>(declRef->getDecl())) {
-                    llvm::outs() << "в non-const функцию передаётся адрес взятый через &: " << referenceVar->getNameAsString() << "\n";
-                    
-                    if (const_refs.find(referenceVar) != const_refs.end()) {
+                  
+                  if (const_refs.find(referenceVar) != const_refs.end()) {
                     const_refs.erase(const_refs.find(referenceVar));
                   }
+
                 }
               }
             }
@@ -199,7 +192,6 @@ public:
   }
 
   bool VisitCXXMemberCallExpr(clang::CXXMemberCallExpr *call) {
-    
     clang::Expr *objectExpr = call->getImplicitObjectArgument()->IgnoreParenImpCasts();
     if (auto* declRef = llvm::dyn_cast<clang::DeclRefExpr>(objectExpr)) {
       if (auto *varDecl = llvm::dyn_cast<clang::VarDecl>(declRef->getDecl())) {
@@ -211,6 +203,7 @@ public:
           if (const_ptrs.find(varDecl) != const_ptrs.end()) {
             const_ptrs.erase(const_ptrs.find(varDecl));
           }
+
         }
       }
     }
@@ -225,21 +218,22 @@ public:
       clang::SourceLocation typeEnd = varDecl->getTypeSpecEndLoc();
 
         if (typeStart.isValid() && typeEnd.isValid()) {
+          llvm::outs() << "changed " << varDecl->getName() << " type to " << "\"const " + varDecl->getType().getAsString() + " const\"" + "\n";
           m_rewriter.ReplaceText(clang::SourceRange(typeStart, typeEnd), "const " + varDecl->getType().getAsString() + " const ");
-      }
+        }
     }
     for (clang::VarDecl* varDecl : const_refs) {
       clang::SourceLocation typeStart = varDecl->getTypeSpecStartLoc();
       clang::SourceLocation typeEnd = varDecl->getTypeSpecEndLoc();
 
         if (typeStart.isValid() && typeEnd.isValid()) {
+          llvm::outs() << "changed " << varDecl->getName() << " type to " << "\"const " + varDecl->getType().getAsString() + "\"" + "\n";
           m_rewriter.ReplaceText(clang::SourceRange(typeStart, typeEnd), "const " + varDecl->getType().getAsString());
       }
     }
   }
 
 private:
-  clang::ASTContext *m_context;
   std::set<clang::VarDecl*> const_ptrs;
   std::set<clang::VarDecl*> const_refs;
   std::map<clang::VarDecl*, std::vector<clang::VarDecl*>> aliasGraph; // мапа из varDecl, где varDecl - это поинтер/ссылка, в вектор поинтеров/ссылок, которые будут меняться вместе с изменением этого varDecl
@@ -264,9 +258,9 @@ private:
   void removePointeesFromSets() {
     std::set<clang::VarDecl*> visited;
     for (const auto& p : aliasGraph) {
-      clang::VarDecl* ptr = p.first; // this is actually a ptr or a reference
-      if ((const_ptrs.find(ptr) == const_ptrs.end()) && (const_refs.find(ptr) == const_refs.end())) { // this ptr/ref is non-const so every other node needs to be removed
-        removePointeesByPtr(ptr, visited);
+      clang::VarDecl* ptr_or_reference = p.first;
+      if ((const_ptrs.find(ptr_or_reference) == const_ptrs.end()) && (const_refs.find(ptr_or_reference) == const_refs.end())) { // this ptr/ref is non-const so every other node needs to be removed
+        removePointeesByPtr(ptr_or_reference, visited);
       }
     }
   }
@@ -300,15 +294,10 @@ public:
     return true;
   }
 
-  void EndSourceFileAction() override {
-    m_rewriter.getEditBuffer(m_rewriter.getSourceMgr().getMainFileID())
-              .write(llvm::outs());
-  }
-
 private:
   clang::Rewriter m_rewriter;
 };
 } // namespace
 
 static clang::FrontendPluginRegistry::Add<ZavyalovAction>
-    X("zavyalov_a_lab1_plugin", "Description plugin");
+    X("zavyalov_a_lab1_plugin", "Plugin for replacing non-const pointers and references with const ones whenever possible");
