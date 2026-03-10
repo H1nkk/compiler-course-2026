@@ -12,34 +12,14 @@ namespace {
 class ZavyalovVisitor final : public clang::RecursiveASTVisitor<ZavyalovVisitor> {
 public:
   explicit ZavyalovVisitor(clang::ASTContext *context, clang::Rewriter &rewriter) : m_context(context), m_rewriter(rewriter) {}
-  bool VisitFunctionDecl(clang::FunctionDecl *func) {
-    func->dump();
-    llvm::outs() << "im a function\n";
-    return true;
-  }
 
   bool VisitVarDecl(clang::VarDecl *varDecl) {
     clang::QualType varType = varDecl->getType();
     if (varType->isPointerType()) {
       const_ptrs.insert(varDecl);
 
-      clang::SourceLocation typeStart = varDecl->getTypeSpecStartLoc();
-      clang::SourceLocation typeEnd = varDecl->getTypeSpecEndLoc();
-
       clang::Expr *initExpr = varDecl->getInit();
       if (initExpr) {
-        // проверка что указатель инициализируется другой ссылкой А ЗАЧЕМ ЭТО ВООБЩЕ НАДО?
-        if (auto* declRef = llvm::dyn_cast<clang::DeclRefExpr>(initExpr)) {
-          if (auto* rhs_varDecl = llvm::dyn_cast<clang::VarDecl>(declRef->getDecl())) {
-            if (rhs_varDecl->getType()->isReferenceType()) {
-              llvm::outs() << "ptr is being initialized with reference: " << rhs_varDecl->getNameAsString() << "\n";
-
-              ptrToPointees[varDecl].push_back(rhs_varDecl);
-              ptrToPointees[varDecl].push_back(rhs_varDecl);
-            }
-          }
-        }
-
         // проверка что указатель инициализируется с помощью взятия адреса
         if (auto* op = llvm::dyn_cast<clang::UnaryOperator>(initExpr)) {
           if (op->getOpcode() == clang::UO_AddrOf) {
@@ -49,8 +29,8 @@ public:
               if (auto* rhs_varDecl = llvm::dyn_cast<clang::VarDecl>(declRef->getDecl())) {
                 llvm::outs() << "ptr is being initialized with address of " << rhs_varDecl->getNameAsString() << "\n";
 
-                ptrToPointees[varDecl].push_back(rhs_varDecl);
-                ptrToPointees[rhs_varDecl].push_back(varDecl);
+                aliasGraph[varDecl].push_back(rhs_varDecl);
+                aliasGraph[rhs_varDecl].push_back(varDecl);
               }
             }
           }
@@ -62,8 +42,8 @@ public:
             if (rhs_varDecl->getType()->isPointerType()) {
               llvm::outs() << "ptr is being initialized with pointer: " << rhs_varDecl->getNameAsString() << "\n";
 
-              ptrToPointees[varDecl].push_back(rhs_varDecl);
-              ptrToPointees[rhs_varDecl].push_back(varDecl);
+              aliasGraph[varDecl].push_back(rhs_varDecl);
+              aliasGraph[rhs_varDecl].push_back(varDecl);
 
             }
           }
@@ -84,8 +64,8 @@ public:
             if (rhs_varDecl->getType()->isReferenceType()) {
               llvm::outs() << "reference is being initialized with another reference: " << rhs_varDecl->getNameAsString() << "\n";
 
-              ptrToPointees[rhs_varDecl].push_back(varDecl);
-              ptrToPointees[varDecl].push_back(rhs_varDecl);
+              aliasGraph[rhs_varDecl].push_back(varDecl);
+              aliasGraph[varDecl].push_back(rhs_varDecl);
             }
           }
     }
@@ -95,7 +75,7 @@ public:
   bool VisitBinaryOperator(clang::BinaryOperator *op) {
     if (op->isAssignmentOp()) { // CompoundAssignmentOp is included in AssignmentOp
 
-      clang::Expr *lhsExpr = op->getLHS()->IgnoreParenImpCasts(); // TODO разбобраться ???
+      clang::Expr *lhsExpr = op->getLHS()->IgnoreParenImpCasts();
 
       // является ли lhs разыменованием ptr
       if (auto* unaryOp = llvm::dyn_cast<clang::UnaryOperator>(lhsExpr)) {
@@ -106,9 +86,6 @@ public:
               llvm::outs() << "ptr is being derefernsed and reassigned: " << varDecl->getNameAsString() << "\n";
               if (const_ptrs.find(varDecl) != const_ptrs.end()) {
                 const_ptrs.erase(const_ptrs.find(varDecl));
-              }
-              if (varDecl->getType()->isPointerType()) { // мб это ваще не надо
-                // TODO
               }
             }
           }
@@ -248,7 +225,6 @@ public:
       clang::SourceLocation typeEnd = varDecl->getTypeSpecEndLoc();
 
         if (typeStart.isValid() && typeEnd.isValid()) {
-          llvm::outs() << "я ща заменю " << varDecl->getNameAsString() << '\n';
           m_rewriter.ReplaceText(clang::SourceRange(typeStart, typeEnd), "const " + varDecl->getType().getAsString() + " const ");
       }
     }
@@ -257,22 +233,20 @@ public:
       clang::SourceLocation typeEnd = varDecl->getTypeSpecEndLoc();
 
         if (typeStart.isValid() && typeEnd.isValid()) {
-          llvm::outs() << "я ща заменю " << varDecl->getNameAsString() << '\n';
           m_rewriter.ReplaceText(clang::SourceRange(typeStart, typeEnd), "const " + varDecl->getType().getAsString());
       }
     }
-    llvm::outs() << "IT SERASFD\n";
   }
 
 private:
   clang::ASTContext *m_context;
   std::set<clang::VarDecl*> const_ptrs;
   std::set<clang::VarDecl*> const_refs;
-  std::map<clang::VarDecl*, std::vector<clang::VarDecl*>> ptrToPointees; // мапа из varDecl, где varDecl - это поинтер/ссылка, в вектор поинтеров/ссылок, которые будут меняться вместе с изменением этого varDecl
+  std::map<clang::VarDecl*, std::vector<clang::VarDecl*>> aliasGraph; // мапа из varDecl, где varDecl - это поинтер/ссылка, в вектор поинтеров/ссылок, которые будут меняться вместе с изменением этого varDecl
   clang::Rewriter &m_rewriter;
 
   void removePointeesByPtr(clang::VarDecl* ptr, std::set<clang::VarDecl*>& visited) {
-    const std::vector<clang::VarDecl*>& pointees = ptrToPointees[ptr];
+    const std::vector<clang::VarDecl*>& pointees = aliasGraph[ptr];
     for (const auto& ptr : pointees) {
       if (visited.find(ptr) != visited.end())
         continue;
@@ -289,7 +263,7 @@ private:
 
   void removePointeesFromSets() {
     std::set<clang::VarDecl*> visited;
-    for (const auto& p : ptrToPointees) {
+    for (const auto& p : aliasGraph) {
       clang::VarDecl* ptr = p.first; // this is actually a ptr or a reference
       if ((const_ptrs.find(ptr) == const_ptrs.end()) && (const_refs.find(ptr) == const_refs.end())) { // this ptr/ref is non-const so every other node needs to be removed
         removePointeesByPtr(ptr, visited);

@@ -20,6 +20,7 @@ void foo_const_ref(const int& x) {
 }
 
 void foo_value(int x) {
+    x++;
 }
 
 void foo_address(int* x) {
