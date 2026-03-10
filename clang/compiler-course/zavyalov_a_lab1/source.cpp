@@ -22,14 +22,53 @@ public:
     clang::QualType varType = varDecl->getType();
     if (varType->isPointerType()) {
       const_ptrs.insert(varDecl);
-      llvm::outs() << "esketit\n";
 
       clang::SourceLocation typeStart = varDecl->getTypeSpecStartLoc();
       clang::SourceLocation typeEnd = varDecl->getTypeSpecEndLoc();
 
-      if (typeStart.isValid() && typeEnd.isValid()) {
-        llvm::outs() << "432234234e\n";
-        //m_rewriter.ReplaceText(clang::SourceRange(typeStart, typeEnd), "long*");
+      clang::Expr *initExpr = varDecl->getInit();
+      if (initExpr) {
+        // проверка что указатель инициализируется другой ссылкой А ЗАЧЕМ ЭТО ВООБЩЕ НАДО?
+        if (auto* declRef = llvm::dyn_cast<clang::DeclRefExpr>(initExpr)) {
+          if (auto* rhs_varDecl = llvm::dyn_cast<clang::VarDecl>(declRef->getDecl())) {
+            if (rhs_varDecl->getType()->isReferenceType()) {
+              llvm::outs() << "ptr is being initialized with reference: " << rhs_varDecl->getNameAsString() << "\n";
+
+              ptrToPointees[varDecl].push_back(rhs_varDecl);
+              ptrToPointees[varDecl].push_back(rhs_varDecl);
+            }
+          }
+        }
+
+        // проверка что указатель инициализируется с помощью взятия адреса
+        if (auto* op = llvm::dyn_cast<clang::UnaryOperator>(initExpr)) {
+          if (op->getOpcode() == clang::UO_AddrOf) {
+            clang::Expr *subExpr = op->getSubExpr()->IgnoreParenImpCasts();
+
+            if (auto* declRef = llvm::dyn_cast<clang::DeclRefExpr>(subExpr)) {
+              if (auto* rhs_varDecl = llvm::dyn_cast<clang::VarDecl>(declRef->getDecl())) {
+                llvm::outs() << "ptr is being initialized with address of " << rhs_varDecl->getNameAsString() << "\n";
+
+                ptrToPointees[varDecl].push_back(rhs_varDecl);
+                ptrToPointees[rhs_varDecl].push_back(varDecl);
+              }
+            }
+          }
+        }
+
+        // проверка что указатель инициализируется другим указателем
+        if (auto* declRef = llvm::dyn_cast<clang::DeclRefExpr>(initExpr->IgnoreParenImpCasts())) {
+          if (auto* rhs_varDecl = llvm::dyn_cast<clang::VarDecl>(declRef->getDecl())) {
+            if (rhs_varDecl->getType()->isPointerType()) {
+              llvm::outs() << "ptr is being initialized with pointer: " << rhs_varDecl->getNameAsString() << "\n";
+
+              ptrToPointees[varDecl].push_back(rhs_varDecl);
+              ptrToPointees[rhs_varDecl].push_back(varDecl);
+
+            }
+          }
+        }
+
       }
     }
 
@@ -37,7 +76,7 @@ public:
       const_refs.insert(varDecl);
       llvm::outs() << "reference found: " << varDecl->getNameAsString() << "\n";
 
-      // проверка что ссылка не инициализируется другой ссылкой
+      // проверка что ссылка инициализируется другой ссылкой
       clang::Expr *initExpr = varDecl->getInit();
       if (initExpr)
         if (auto* declRef = llvm::dyn_cast<clang::DeclRefExpr>(initExpr)) 
@@ -68,7 +107,7 @@ public:
               if (const_ptrs.find(varDecl) != const_ptrs.end()) {
                 const_ptrs.erase(const_ptrs.find(varDecl));
               }
-              if (varDecl->getType()->isPointerType()) {
+              if (varDecl->getType()->isPointerType()) { // мб это ваще не надо
                 // TODO
               }
             }
@@ -76,10 +115,10 @@ public:
         }
       }
 
-      // является ли lhs ссылкой
       if (auto* declRef = llvm::dyn_cast<clang::DeclRefExpr>(lhsExpr)) {
           if (auto* varDecl = llvm::dyn_cast<clang::VarDecl>(declRef->getDecl())) {
-              
+
+            // проверка является ли lhs ссылкой
             if (varDecl->getType()->isReferenceType()) {
               llvm::outs() << "Найден AssignmentOp\n";
               llvm::outs() << "Слева ссылка: " << varDecl->getNameAsString() << "\n";
@@ -88,9 +127,20 @@ public:
               llvm::outs() << "Ссылается на: " << referencedType.getAsString() << "\n";
 
               if (const_refs.find(varDecl) != const_refs.end()) {
-              const_refs.erase(const_refs.find(varDecl));
-            }
+                const_refs.erase(const_refs.find(varDecl));
               }
+            }
+
+            // проверка является ли lhs указателем
+            if (varDecl->getType()->isPointerType()) {
+              llvm::outs() << "Найден AssignmentOp\n";
+              llvm::outs() << "Слева указатель: " << varDecl->getNameAsString() << "\n";
+              
+              if (const_ptrs.find(varDecl) != const_ptrs.end()) {
+                const_ptrs.erase(const_ptrs.find(varDecl));
+              }
+            }
+
           }
         }
 
@@ -101,28 +151,19 @@ public:
   }
   
   bool VisitUnaryOperator(clang::UnaryOperator *op) {
-    if (op->getOpcode() == clang::UO_AddrOf) {  // оператор взятия адреса &
-        clang::Expr *subExpr = op->getSubExpr()->IgnoreParenImpCasts();
-        
-        if (auto *declRef = llvm::dyn_cast<clang::DeclRefExpr>(subExpr)) {
-            if (auto *pointerVar = llvm::dyn_cast<clang::VarDecl>(declRef->getDecl())) {
-                llvm::outs() << "address is being taken: " << pointerVar->getNameAsString() << "\n";
-                
-                if (const_ptrs.find(pointerVar) != const_ptrs.end()) {
-                const_ptrs.erase(const_ptrs.find(pointerVar));
-              }
-            }
-        }
-    }
-    if (op->getOpcode() == clang::UO_PreInc || op->getOpcode() == clang::UO_PostInc || op->getOpcode() == clang::UO_PreDec || op->getOpcode() == clang::UO_PostDec) { // инкременты и декременты
+
+    if (op->getOpcode() == clang::UO_PreInc || op->getOpcode() == clang::UO_PostInc || op->getOpcode() == clang::UO_PreDec || op->getOpcode() == clang::UO_PostDec) {
       clang::Expr *subExpr = op->getSubExpr()->IgnoreParenImpCasts();
-        
+      
       if (auto *declRef = llvm::dyn_cast<clang::DeclRefExpr>(subExpr)) {
         if (auto *referenceVar = llvm::dyn_cast<clang::VarDecl>(declRef->getDecl())) {
-            llvm::outs() << "increment or decrement found: " << referenceVar->getNameAsString() << "\n";
+          llvm::outs() << "increment or decrement found: " << referenceVar->getNameAsString() << "\n";
             
-            if (const_refs.find(referenceVar) != const_refs.end()) {
+          if (const_refs.find(referenceVar) != const_refs.end()) {
             const_refs.erase(const_refs.find(referenceVar));
+          }
+          if (const_ptrs.find(referenceVar) != const_ptrs.end()) {
+            const_ptrs.erase(const_ptrs.find(referenceVar));
           }
         }
       }
@@ -190,6 +231,9 @@ public:
           if (const_refs.find(varDecl) != const_refs.end()) {
             const_refs.erase(const_refs.find(varDecl));
           }
+          if (const_ptrs.find(varDecl) != const_ptrs.end()) {
+            const_ptrs.erase(const_ptrs.find(varDecl));
+          }
         }
       }
     }
@@ -205,7 +249,7 @@ public:
 
         if (typeStart.isValid() && typeEnd.isValid()) {
           llvm::outs() << "я ща заменю " << varDecl->getNameAsString() << '\n';
-          m_rewriter.ReplaceText(clang::SourceRange(typeStart, typeEnd), "long*");
+          m_rewriter.ReplaceText(clang::SourceRange(typeStart, typeEnd), "const " + varDecl->getType().getAsString() + " const ");
       }
     }
     for (clang::VarDecl* varDecl : const_refs) {
