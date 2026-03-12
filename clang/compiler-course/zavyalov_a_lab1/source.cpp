@@ -6,6 +6,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include <map>
 #include <set>
+#include <sstream>
 #include <vector>
 
 namespace {
@@ -232,9 +233,7 @@ public:
       clang::SourceLocation typeEnd = varDecl->getTypeSpecEndLoc();
 
       if (typeStart.isValid() && typeEnd.isValid()) {
-        llvm::outs() << "changed " << varDecl->getName() << " type to "
-                     << "\"const " + varDecl->getType().getAsString() +
-                            " const\"" + "\n";
+
         m_rewriter.ReplaceText(clang::SourceRange(typeStart, typeEnd),
                                "const " + varDecl->getType().getAsString() +
                                    " const ");
@@ -245,9 +244,7 @@ public:
       clang::SourceLocation typeEnd = varDecl->getTypeSpecEndLoc();
 
       if (typeStart.isValid() && typeEnd.isValid()) {
-        llvm::outs() << "changed " << varDecl->getName() << " type to "
-                     << "\"const " + varDecl->getType().getAsString() + "\"" +
-                            "\n";
+
         m_rewriter.ReplaceText(clang::SourceRange(typeStart, typeEnd),
                                "const " + varDecl->getType().getAsString());
       }
@@ -321,6 +318,23 @@ public:
   bool ParseArgs(const clang::CompilerInstance &ci,
                  const std::vector<std::string> &args) override {
     return true;
+  }
+
+  void EndSourceFileAction() override {
+    auto &buffer =
+        m_rewriter.getEditBuffer(m_rewriter.getSourceMgr().getMainFileID());
+
+    std::string content;
+    llvm::raw_string_ostream stream(content);
+    buffer.write(stream);
+
+    std::istringstream iss(content);
+    std::string line;
+    while (std::getline(iss, line)) {
+      if (line.find("//") == std::string::npos) {
+        llvm::outs() << line << "\n";
+      }
+    }
   }
 
 private:
