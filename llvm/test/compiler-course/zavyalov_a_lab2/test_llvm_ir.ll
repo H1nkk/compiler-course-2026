@@ -11,6 +11,7 @@ entry:
   %0 = load i32, ptr %a.addr, align 4
   %1 = load i32, ptr %b.addr, align 4
 ; CHECK: %cmp.sge = icmp sge i32 %0, %1
+; CHECK: %cmp.sge.not = xor i1 %cmp.sge, true
 ; CHECK: ret i1 %cmp.sge.not
   %cmp = icmp slt i32 %0, %1
   ret i1 %cmp
@@ -26,6 +27,7 @@ entry:
   %0 = load i32, ptr %a.addr, align 4
   %1 = load i32, ptr %b.addr, align 4
 ; CHECK: %cmp.sle = icmp sle i32 %0, %1
+; CHECK: %cmp.sle.not = xor i1 %cmp.sle, true
 ; CHECK: ret i1 %cmp.sle.not
   %cmp = icmp sgt i32 %0, %1
   ret i1 %cmp
@@ -41,6 +43,7 @@ entry:
   %0 = load i32, ptr %a.addr, align 4
   %1 = load i32, ptr %b.addr, align 4
 ; CHECK: %cmp.sgt = icmp sgt i32 %0, %1
+; CHECK: %cmp.sgt.not = xor i1 %cmp.sgt, true
 ; CHECK: ret i1 %cmp.sgt.not
   %cmp = icmp sle i32 %0, %1
   ret i1 %cmp
@@ -56,6 +59,7 @@ entry:
   %0 = load i32, ptr %a.addr, align 4
   %1 = load i32, ptr %b.addr, align 4
 ; CHECK: %cmp.slt = icmp slt i32 %0, %1
+; CHECK: %cmp.slt.not = xor i1 %cmp.slt, true
 ; CHECK: ret i1 %cmp.slt.not
   %cmp = icmp sge i32 %0, %1
   ret i1 %cmp
@@ -71,6 +75,7 @@ entry:
   %0 = load i32, ptr %a.addr, align 4
   %1 = load i32, ptr %b.addr, align 4
 ; CHECK: %cmp.uge = icmp uge i32 %0, %1
+; CHECK: %cmp.uge.not = xor i1 %cmp.uge, true
 ; CHECK: ret i1 %cmp.uge.not
   %cmp = icmp ult i32 %0, %1
   ret i1 %cmp
@@ -86,6 +91,7 @@ entry:
   %0 = load i32, ptr %a.addr, align 4
   %1 = load i32, ptr %b.addr, align 4
 ; CHECK: %cmp.ule = icmp ule i32 %0, %1
+; CHECK: %cmp.ule.not = xor i1 %cmp.ule, true
 ; CHECK: ret i1 %cmp.ule.not
   %cmp = icmp ugt i32 %0, %1
   ret i1 %cmp
@@ -101,6 +107,7 @@ entry:
   %0 = load i32, ptr %a.addr, align 4
   %1 = load i32, ptr %b.addr, align 4
 ; CHECK: %cmp.ugt = icmp ugt i32 %0, %1
+; CHECK: %cmp.ugt.not = xor i1 %cmp.ugt, true
 ; CHECK: ret i1 %cmp.ugt.not
   %cmp = icmp ule i32 %0, %1
   ret i1 %cmp
@@ -116,6 +123,7 @@ entry:
   %0 = load i32, ptr %a.addr, align 4
   %1 = load i32, ptr %b.addr, align 4
 ; CHECK: %cmp.ult = icmp ult i32 %0, %1
+; CHECK: %cmp.ult.not = xor i1 %cmp.ult, true
 ; CHECK: ret i1 %cmp.ult.not
   %cmp = icmp uge i32 %0, %1
   ret i1 %cmp
