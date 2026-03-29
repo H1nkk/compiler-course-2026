@@ -13,7 +13,6 @@ entry:
   store i32 %b, ptr %b.addr, align 4
   %0 = load i32, ptr %a.addr, align 4
   %1 = load i32, ptr %b.addr, align 4
-
   %cmp = icmp slt i32 %0, %1
   ret i1 %cmp
 }
