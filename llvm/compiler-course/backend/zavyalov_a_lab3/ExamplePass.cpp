@@ -21,56 +21,52 @@ public:
     Loops.push_back(Loop);
   }
 
-  bool hasUniquePreheader(MachineLoop *L) {
-    MachineBasicBlock *Header = L->getHeader();
-    if (!Header)
+  bool hasSinglePreheaderBlock(MachineLoop *Loop) {
+    auto *Hdr = Loop->getHeader();
+    if (!Hdr)
       return false;
 
-    MachineBasicBlock *Preheader = nullptr;
+    MachineBasicBlock *Candidate = nullptr;
 
-    for (MachineBasicBlock *Pred : Header->predecessors()) {
-      if (L->contains(Pred))
+    for (auto *Pred : Hdr->predecessors()) {
+      if (Loop->contains(Pred))
         continue;
 
-      if (Preheader)
+      if (Candidate != nullptr)
         return false;
 
-      Preheader = Pred;
+      Candidate = Pred;
     }
 
-    return Preheader != nullptr;
+    return Candidate != nullptr;
   }
 
-  MachineBasicBlock *getUniqueExitingBlock(MachineLoop *L) {
-    MachineBasicBlock *Exiting = nullptr;
+  MachineBasicBlock *findSingleExitBlock(MachineLoop *Loop) {
+    MachineBasicBlock *Result = nullptr;
 
-    for (MachineBasicBlock *MBB : L->blocks()) {
-      bool HasOutsideSucc = false;
+    for (auto *Block : Loop->blocks()) {
+      bool exitsLoop = llvm::any_of(Block->successors(),
+                                  [&](MachineBasicBlock *Succ) {
+                                    return !Loop->contains(Succ);
+                                  });
 
-      for (MachineBasicBlock *Succ : MBB->successors()) {
-        if (!L->contains(Succ)) {
-          HasOutsideSucc = true;
-          break;
-        }
-      }
-
-      if (!HasOutsideSucc)
+      if (!exitsLoop)
         continue;
 
-      if (Exiting)
+      // если уже находили такой блок — значит он не единственный
+      if (Result != nullptr)
         return nullptr;
 
-      Exiting = MBB;
+      Result = Block;
     }
 
-    return Exiting;
+    return Result;
   }
 
   static char ID;
   LoopUnrollPass() : MachineFunctionPass(ID) {}
   bool runOnMachineFunction(MachineFunction &MF) override;
 
-  // ── getTripCount ────────────────────────────────────────────────────────────
   unsigned getTripCount(MachineLoop *Loop) {
     // сначала пробуем latch, потом header
     MachineBasicBlock *Latch  = Loop->getLoopLatch();
@@ -91,19 +87,15 @@ public:
     return 0;
   }
 
-  // ── unrollLoop ──────────────────────────────────────────────────────────────
   bool unrollLoop(MachineLoop *Loop, unsigned Count, MachineFunction &MF, MachineLoopInfo &MLI) {
     if (Count <= 1) return false;
-    llvm::outs() << "Loop in " << MF.getName() 
-          << " TripCount=" << Count << "\n";
     MachineBasicBlock *Latch = Loop->getLoopLatch();
-    MachineBasicBlock *Exiting = getUniqueExitingBlock(Loop); // TODO чекнуть
+    MachineBasicBlock *Exiting = findSingleExitBlock(Loop);
 
-    if (!hasUniquePreheader(Loop) || !Latch || !Exiting ) {
+    if (!hasSinglePreheaderBlock(Loop) || !Latch || !Exiting ) {
       return false;
     }
 
-    llvm::outs() << "дожиди\n";
     // ищем число итераций в одном блоке
     int itersInBlock = 1;
     for (int div = maxUnrollingIters; div > 0; div--) {
@@ -118,10 +110,8 @@ public:
 
     SmallVector<MachineInstr *, 16> LoopBody;
 
-    // ищем функции которые будем копировать
+    // ищем инструкции которые будем копировать
     for (auto &MBB : Loop->blocks()) {
-
-
       for (auto &MI : *MBB) {
         if (MI.isBranch() || MI.isTerminator() || MI.isDebugInstr()) {
           continue;
@@ -138,16 +128,9 @@ public:
       return false;
     }
 
-    // TODO чекнуть, мб тут iterator надо
     const auto& WhereToInsert = Exiting->getFirstTerminator(); // первая инструкция-терминатор
 
-    
     int AmountOfCopies = itersInBlock - 1;
-    // проверка на вложенные циклы
-    if (Loop->begin() != Loop->end()) { // если есть вложенные циклы, то копируем на 1 раз больше
-      ++AmountOfCopies;
-    }
-
 
     Register CounterReg;
     for (auto &MI : *Latch) {
@@ -173,12 +156,9 @@ public:
     return true;
   }
 
-  // ── getAnalysisUsage ────────────────────────────────────────────────────────
-  // unchanged — was already correct
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<MachineLoopInfoWrapperPass>();
      AU.setPreservesCFG();
-    // AU.addRequired<MachineDominatorTreeWrapperPass>();
     MachineFunctionPass::getAnalysisUsage(AU);
   }
 };
