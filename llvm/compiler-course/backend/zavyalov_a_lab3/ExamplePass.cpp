@@ -12,6 +12,7 @@ using namespace llvm;
 namespace {
 class LoopUnrollPass : public MachineFunctionPass {
   const X86InstrInfo *TII = nullptr;
+  static constexpr int maxUnrollingIters = 5;
 public:
 
   static char ID;
@@ -19,162 +20,103 @@ public:
   bool runOnMachineFunction(MachineFunction &MF) override;
 
   // ── getTripCount ────────────────────────────────────────────────────────────
-  // CHANGED: filled in the empty body with real CMP32ri detection logic
-
   unsigned getTripCount(MachineLoop *Loop) {
-    // Try latch first, then fall back to header
+    // сначала пробуем latch, потом header
     MachineBasicBlock *Latch  = Loop->getLoopLatch();
     MachineBasicBlock *Header = Loop->getHeader();
 
     for (MachineBasicBlock *BB : {Latch, Header}) {
       if (!BB) continue;
       for (auto &MI : reverse(*BB)) {
-        if (MI.getOpcode() == X86::CMP32ri ||
-            MI.getOpcode() == X86::CMP32ri8) {
-          int64_t Imm = MI.getOperand(1).getImm();
-          
-          return (unsigned)(Imm + 1);
+        if (MI.getOpcode() == X86::CMP32ri || MI.getOpcode() == X86::CMP32ri8) {
+          for (auto &MO : MI.operands()) {
+            if (MO.isImm()) {
+              return (unsigned)(MO.getImm() + 1);
+            }
+          }
         }
       }
     }
     return 0;
   }
-/*
-  unsigned getTripCount(MachineLoop *Loop) {
-    MachineBasicBlock *Latch = Loop->getLoopLatch();
-    if (!Latch) return 0;
-
-    MachineInstr *CmpMI = nullptr;
-    for (auto &MI : reverse(*Latch)) {
-      // ADDED: actually look for the CMP instruction by opcode
-      if (MI.getOpcode() == X86::CMP32ri || MI.getOpcode() == X86::CMP32ri8) {
-        CmpMI = &MI;
-        break;
-      }
-    }
-
-    if (!CmpMI) return 0;
-
-    // ADDED: the immediate is N-1 because "i < N" compiles to "CMP reg, N-1"
-    int64_t Imm = CmpMI->getOperand(1).getImm();
-    unsigned TripCount = (unsigned)(Imm + 1);
-    return TripCount;
-  }
-*/
 
   // ── unrollLoop ──────────────────────────────────────────────────────────────
-  bool unrollLoop(MachineLoop *Loop, unsigned Count, MachineFunction &MF) {
-    llvm::outs() << "  unrollLoop: Count=" << Count << "\n";
-    
-    MachineBasicBlock *Header = Loop->getHeader();
-    MachineBasicBlock *Latch  = Loop->getLoopLatch();
-    MachineBasicBlock *Exit   = Loop->getExitBlock();
+  bool unrollLoop(MachineLoop *Loop, unsigned Count, MachineFunction &MF, MachineLoopInfo &MLI) {
+    if (Count <= 1) return false;
 
-    llvm::outs() << "  Header=" << Header->getName() << "\n";
-    llvm::outs() << "  Latch="  << Latch->getName()  << "\n";
-    llvm::outs() << "  Exit="   << (Exit ? Exit->getName() : "null") << "\n";
+    MachineBasicBlock *Latch = Loop->getLoopLatch();
+    MachineBasicBlock *Exiting = Loop->getUniqueExitBlock(); // TODO чекнуть
 
-    if (!Latch || !Exit) {
-      llvm::outs() << "  Aborting: null Latch or Exit\n";
+    if (!Latch || !Exiting || Exiting != Latch) {
       return false;
     }
 
-    SmallVector<MachineBasicBlock*, 4> BodyBlocks(Loop->block_begin(),
-                                                  Loop->block_end());
-
-    MachineBasicBlock *PrevLatch = Latch; // end of the previous iteration
-
-    // Safe removeSuccessor — only remove if it's actually a successor
-    auto safeRemoveSuccessor = [](MachineBasicBlock *From, MachineBasicBlock *To) {
-      for (auto I = From->succ_begin(); I != From->succ_end(); ++I) {
-        if (*I == To) {
-          From->removeSuccessor(I);
-          return;
-        }
+    // ищем число итераций в одном блоке
+    int itersInBlock = 1;
+    for (int div = maxUnrollingIters; div > 0; div--) {
+      if (Count % div == 0) {
+        itersInBlock = div;
+        break;
       }
-    };
-
-    for (unsigned i = 1; i < Count; ++i) {
-      DenseMap<MachineBasicBlock*, MachineBasicBlock*> BlockMap;
-
-      // Clone every block in the loop body
-      for (MachineBasicBlock *MBB : BodyBlocks) {
-        MachineBasicBlock *Clone = MF.CreateMachineBasicBlock();
-        MF.insert(MF.end(), Clone);
-        BlockMap[MBB] = Clone;
-        for (const MachineInstr &MI : *MBB)
-          Clone->push_back(MF.CloneMachineInstr(&MI));
-      }
-
-      // Fix up branch targets inside clones
-      for (auto &[OldBB, NewBB] : BlockMap) {
-        for (MachineInstr &MI : *NewBB) {
-          for (MachineOperand &MO : MI.operands()) {
-            if (MO.isMBB() && BlockMap.count(MO.getMBB()))
-              MO.setMBB(BlockMap[MO.getMBB()]);
-          }
-        }
-      }
-
-      // Connect previous latch to the new header clone —
-      // remove the old back-edge branch and add a fall-through
-      MachineBasicBlock *NewHeader = BlockMap[Header];
-      PrevLatch->erase(PrevLatch->getFirstTerminator(), PrevLatch->end());
-      safeRemoveSuccessor(PrevLatch, Header);          // original latch → original header
-      safeRemoveSuccessor(PrevLatch, BlockMap[Header]); // clone latch → clone header (2nd+ iters)
-      PrevLatch->addSuccessor(NewHeader);
-      BuildMI(*PrevLatch, PrevLatch->end(), DebugLoc(),
-              TII->get(X86::JMP_1)).addMBB(NewHeader);
-
-      PrevLatch = BlockMap[Latch];
+    }
+    if (itersInBlock == 1) {
+      return false;
     }
 
-    // Remove the back-edge from the final latch — it should fall to Exit
-    PrevLatch->erase(PrevLatch->getFirstTerminator(), PrevLatch->end());
-    safeRemoveSuccessor(PrevLatch, Header);
-    PrevLatch->addSuccessor(Exit);
-    BuildMI(*PrevLatch, PrevLatch->end(), DebugLoc(),
-            TII->get(X86::JMP_1)).addMBB(Exit);
-    return true;
-  }
+    SmallVector<MachineInstr *, 16> LoopBody;
 
-  /*
-  bool unrollLoop(MachineLoop *Loop, unsigned Count, MachineFunction &MF) {
-    SmallVector<MachineBasicBlock*, 4> BodyBlocks(Loop->block_begin(),
-                                                  Loop->block_end());
-    for (unsigned i = 1; i < Count; ++i) {
-      DenseMap<MachineBasicBlock*, MachineBasicBlock*> BlockMap;
-      for (MachineBasicBlock *MBB : BodyBlocks) {
-        MachineBasicBlock *Clone = MF.CreateMachineBasicBlock();
-        MF.insert(MF.end(), Clone);
-        BlockMap[MBB] = Clone;
-
-        for (const MachineInstr &MI : *MBB)
-          Clone->push_back(MF.CloneMachineInstr(&MI));
+    // ищем функции которые будем копировать
+    for (auto &MBB : Loop->blocks()) {
+      if (MLI.getLoopFor(MBB) != Loop) {
+        continue;
       }
 
-      // ADDED: fix up branch targets in cloned blocks to point to other clones
-      // instead of the originals
-      for (auto &[OldBB, NewBB] : BlockMap) {
-        for (MachineInstr &MI : *NewBB) {
-          for (MachineOperand &MO : MI.operands()) {
-            if (MO.isMBB() && BlockMap.count(MO.getMBB()))
-              MO.setMBB(BlockMap[MO.getMBB()]);
-          }
+      for (auto &MI : *MBB) {
+        if (MI.isBranch() || MI.isTerminator() || MI.isDebugInstr()) {
+          continue;
         }
+
+        LoopBody.push_back(&MI);
       }
     }
 
-    // ADDED: remove the backedge branch from the original latch so the loop
-    // doesn't jump back to the header after the last iteration
-    MachineBasicBlock *OrigLatch = Loop->getLoopLatch();
-    if (OrigLatch) {
-      OrigLatch->erase(OrigLatch->getFirstTerminator(), OrigLatch->end());
+    if (LoopBody.empty()) {
+      return false;
+    }
+
+    // TODO чекнуть, мб тут iterator надо
+    const auto& WhereToInsert = Latch->getFirstTerminator(); // первая инструкция-терминатор
+
+    
+    int AmountOfCopies = itersInBlock - 1;
+    // проверка на вложенные циклы
+    if (Loop->begin() != Loop->end()) { // если есть вложенные циклы, то копируем на 1 раз больше
+      ++AmountOfCopies;
+    }
+
+    for (int i = 0; i < AmountOfCopies; i++) {
+      for (auto &MI : LoopBody) {
+        const auto& Clone = MF.CloneMachineInstr(MI);
+        Latch->insert(WhereToInsert, Clone);
+      }
+    }
+
+    // изменяем блок обновления переменной индукции
+    for (auto &MI : *Latch) {
+      if (MI.getOpcode() != X86::ADD32ri8) {
+        continue;
+      }
+
+      for (auto &Op : MI.operands()) {
+        if (Op.isImm() && Op.getImm() == 1) {
+          Op.setImm(itersInBlock);
+        }
+      }
     }
 
     return true;
   }
-  */
+
 
   // ── tryUnrollLoop ───────────────────────────────────────────────────────────
   // unchanged — was already correct
@@ -192,7 +134,7 @@ public:
       return Changed;
 
     llvm::outs() << "  Unrolling!\n";
-    Changed |= unrollLoop(Loop, TripCount, MF);
+    Changed |= unrollLoop(Loop, TripCount, MF, MLI);
     return Changed;
   }
 
@@ -200,7 +142,7 @@ public:
   // unchanged — was already correct
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<MachineLoopInfoWrapperPass>();
-    AU.addRequired<MachineDominatorTreeWrapperPass>();
+    // AU.addRequired<MachineDominatorTreeWrapperPass>();
     MachineFunctionPass::getAnalysisUsage(AU);
   }
 };
@@ -218,8 +160,6 @@ bool LoopUnrollPass::runOnMachineFunction(MachineFunction &MF) {
     Changed |= tryUnrollLoop(Loop, MLI, MF);
   }
 
-  // REMOVED: the llvm::outs() debug print — it fired on every function
-  // even ones with no loops, which is just noise
 
   return Changed;
 }
