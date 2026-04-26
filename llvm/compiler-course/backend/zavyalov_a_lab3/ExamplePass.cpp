@@ -11,9 +11,60 @@ using namespace llvm;
 
 namespace {
 class LoopUnrollPass : public MachineFunctionPass {
-  const X86InstrInfo *TII = nullptr;
   static constexpr int maxUnrollingIters = 5;
+  const X86InstrInfo *TII = nullptr;
 public:
+
+  void FillLoops(MachineLoop *Loop, SmallVectorImpl<MachineLoop *> &Loops) {
+    for (MachineLoop *SubLoop : *Loop)
+      FillLoops(SubLoop, Loops);
+    Loops.push_back(Loop);
+  }
+
+  bool hasUniquePreheader(MachineLoop *L) {
+    MachineBasicBlock *Header = L->getHeader();
+    if (!Header)
+      return false;
+
+    MachineBasicBlock *Preheader = nullptr;
+
+    for (MachineBasicBlock *Pred : Header->predecessors()) {
+      if (L->contains(Pred))
+        continue;
+
+      if (Preheader)
+        return false;
+
+      Preheader = Pred;
+    }
+
+    return Preheader != nullptr;
+  }
+
+  MachineBasicBlock *getUniqueExitingBlock(MachineLoop *L) {
+    MachineBasicBlock *Exiting = nullptr;
+
+    for (MachineBasicBlock *MBB : L->blocks()) {
+      bool HasOutsideSucc = false;
+
+      for (MachineBasicBlock *Succ : MBB->successors()) {
+        if (!L->contains(Succ)) {
+          HasOutsideSucc = true;
+          break;
+        }
+      }
+
+      if (!HasOutsideSucc)
+        continue;
+
+      if (Exiting)
+        return nullptr;
+
+      Exiting = MBB;
+    }
+
+    return Exiting;
+  }
 
   static char ID;
   LoopUnrollPass() : MachineFunctionPass(ID) {}
@@ -43,14 +94,16 @@ public:
   // ── unrollLoop ──────────────────────────────────────────────────────────────
   bool unrollLoop(MachineLoop *Loop, unsigned Count, MachineFunction &MF, MachineLoopInfo &MLI) {
     if (Count <= 1) return false;
-
+    llvm::outs() << "Loop in " << MF.getName() 
+          << " TripCount=" << Count << "\n";
     MachineBasicBlock *Latch = Loop->getLoopLatch();
-    MachineBasicBlock *Exiting = Loop->getUniqueExitBlock(); // TODO чекнуть
+    MachineBasicBlock *Exiting = getUniqueExitingBlock(Loop); // TODO чекнуть
 
-    if (!Latch || !Exiting || Exiting != Latch) {
+    if (!hasUniquePreheader(Loop) || !Latch || !Exiting ) {
       return false;
     }
 
+    llvm::outs() << "дожиди\n";
     // ищем число итераций в одном блоке
     int itersInBlock = 1;
     for (int div = maxUnrollingIters; div > 0; div--) {
@@ -67,12 +120,13 @@ public:
 
     // ищем функции которые будем копировать
     for (auto &MBB : Loop->blocks()) {
-      if (MLI.getLoopFor(MBB) != Loop) {
-        continue;
-      }
+
 
       for (auto &MI : *MBB) {
         if (MI.isBranch() || MI.isTerminator() || MI.isDebugInstr()) {
+          continue;
+        }
+        if (MI.getOpcode() == X86::CMP32ri || MI.getOpcode() == X86::CMP32ri8 || MI.getOpcode() == X86::INC32r) {
           continue;
         }
 
@@ -85,7 +139,7 @@ public:
     }
 
     // TODO чекнуть, мб тут iterator надо
-    const auto& WhereToInsert = Latch->getFirstTerminator(); // первая инструкция-терминатор
+    const auto& WhereToInsert = Exiting->getFirstTerminator(); // первая инструкция-терминатор
 
     
     int AmountOfCopies = itersInBlock - 1;
@@ -94,54 +148,36 @@ public:
       ++AmountOfCopies;
     }
 
-    for (int i = 0; i < AmountOfCopies; i++) {
-      for (auto &MI : LoopBody) {
-        const auto& Clone = MF.CloneMachineInstr(MI);
-        Latch->insert(WhereToInsert, Clone);
+
+    Register CounterReg;
+    for (auto &MI : *Latch) {
+      if (MI.getOpcode() == X86::INC32r) {
+        CounterReg = MI.getOperand(0).getReg();
+        break;
       }
     }
 
-    // изменяем блок обновления переменной индукции
-    for (auto &MI : *Latch) {
-      if (MI.getOpcode() != X86::ADD32ri8) {
-        continue;
-      }
+    // копируем
+    for (int i = 0; i < AmountOfCopies; i++) {
+      // сначала инкремент счётчика
+      BuildMI(*Exiting, WhereToInsert, DebugLoc(), TII->get(X86::INC32r), CounterReg)
+          .addReg(CounterReg);
 
-      for (auto &Op : MI.operands()) {
-        if (Op.isImm() && Op.getImm() == 1) {
-          Op.setImm(itersInBlock);
-        }
+      // потом копия тела
+      for (auto &MI : LoopBody) {
+        MachineInstr *Clone = MF.CloneMachineInstr(MI);
+        Exiting->insert(WhereToInsert, Clone);
       }
     }
 
     return true;
   }
 
-
-  // ── tryUnrollLoop ───────────────────────────────────────────────────────────
-  // unchanged — was already correct
-  bool tryUnrollLoop(MachineLoop *Loop, MachineLoopInfo &MLI, MachineFunction &MF) {
-    bool Changed = false;
-
-    for (MachineLoop *SubLoop : *Loop) {
-      Changed |= tryUnrollLoop(SubLoop, MLI, MF);
-    }
-
-    unsigned TripCount = getTripCount(Loop);
-    llvm::outs() << "Loop in " << MF.getName() 
-             << " TripCount=" << TripCount << "\n";
-    if (TripCount == 0 || TripCount > 5)
-      return Changed;
-
-    llvm::outs() << "  Unrolling!\n";
-    Changed |= unrollLoop(Loop, TripCount, MF, MLI);
-    return Changed;
-  }
-
   // ── getAnalysisUsage ────────────────────────────────────────────────────────
   // unchanged — was already correct
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<MachineLoopInfoWrapperPass>();
+     AU.setPreservesCFG();
     // AU.addRequired<MachineDominatorTreeWrapperPass>();
     MachineFunctionPass::getAnalysisUsage(AU);
   }
@@ -149,20 +185,26 @@ public:
 
 char LoopUnrollPass::ID = 0;
 
-bool LoopUnrollPass::runOnMachineFunction(MachineFunction &MF) {
+bool LoopUnrollPass::runOnMachineFunction(MachineFunction &MF)  {
   TII = MF.getSubtarget<X86Subtarget>().getInstrInfo();
-  auto &MLI = getAnalysis<MachineLoopInfoWrapperPass>().getLI();
-  bool Changed = false;
+    auto &MLI = getAnalysis<MachineLoopInfoWrapperPass>().getLI();
 
-  SmallVector<MachineLoop*, 4> Loops(MLI.begin(), MLI.end());
+    bool Changed = false;
+    SmallVector<MachineLoop*, 8> Loops;
 
-  for (MachineLoop *Loop : Loops) {
-    Changed |= tryUnrollLoop(Loop, MLI, MF);
+    for (MachineLoop *Loop : MLI) {
+      FillLoops(Loop, Loops);
+    }
+    
+    for (MachineLoop *Loop : Loops) {
+      
+      unsigned TripCount = getTripCount(Loop);
+      Changed |= unrollLoop(Loop, TripCount, MF, MLI);
+    }
+
+    return Changed;
   }
 
-
-  return Changed;
-}
 } // namespace
 
 static RegisterPass<LoopUnrollPass> X("loop-unroll-x86", "loop unrolling pass", false,
